@@ -4,13 +4,12 @@ from config import settings
 
 class AnimeScraper:
     def __init__(self):
-        # cloudscraper maneja automáticamente los retos de JavaScript de Cloudflare
         self.scraper = cloudscraper.create_scraper(
             browser={'browser': 'chrome', 'platform': 'android', 'desktop': False}
         )
 
     def get_latest_episodes(self):
-        url = "https://your-anime-target-site.com" # Reemplaza con la fuente objetivo
+        url = "https://your-anime-target-site.com"  # Reemplaza con tu fuente objetivo
         try:
             response = self.scraper.get(url, headers=settings.HEADERS)
             if response.status_code != 200:
@@ -19,7 +18,6 @@ class AnimeScraper:
             soup = BeautifulSoup(response.text, 'html.parser')
             episodes = []
             
-            # Ejemplo de parsing (ajustar selectores según la web objetivo)
             for item in soup.select('.anime-card-class')[:20]:
                 title = item.select_h2.text.strip() if item.select_h2 else "Sin título"
                 link = item.find('a')['href'] if item.find('a') else ""
@@ -30,7 +28,6 @@ class AnimeScraper:
             return {"success": False, "error": str(e)}
 
     def get_episode_sources(self, episode_id: str):
-        # Lógica para extraer los servidores de video (mp4/m3u8), audios y subtítulos
         return {
             "episode_id": episode_id,
             "sources": [
