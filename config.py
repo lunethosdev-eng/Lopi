@@ -2,7 +2,7 @@ import os
 
 class Settings:
     PROJECT_NAME = "Lopi Anime API"
-    VERSION = "2.0.0"
+    VERSION = "2.2.0"
     REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "12"))
     RETRIES = int(os.getenv("REQUEST_RETRIES", "1"))
     MAX_WORKERS = int(os.getenv("MAX_WORKERS", "8"))
