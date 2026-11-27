@@ -18,8 +18,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copiar el código fuente del servidor
 COPY . .
 
-# Exponer el puerto que usa Flask
-EXPOSE 5000
-
-# Comando para ejecutar la aplicación con Gunicorn
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "app:app", "--workers", "2", "--threads", "4", "--timeout", "120"]
+# Render asigna dinámicamente un puerto mediante la variable de entorno $PORT. 
+# Si se ejecuta localmente sin $PORT, usará por defecto el puerto 10000.
+# Usamos -k uvicorn.workers.UvicornWorker porque FastAPI es ASGI.
+CMD sh -c "gunicorn main:app --bind 0.0.0.0:${PORT:-10000} -k uvicorn.workers.UvicornWorker --workers 2 --threads 4 --timeout 120"
