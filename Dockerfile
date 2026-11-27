@@ -11,12 +11,18 @@ RUN apt-get update && apt-get install -y \
     libxslt-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copiar e instalar los requerimientos de forma explícita
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Instalar las librerías directamente sin depender de requirements.txt
+RUN pip install --no-cache-dir \
+    fastapi==0.110.0 \
+    uvicorn==0.28.0 \
+    cloudscraper==1.2.71 \
+    beautifulsoup4==4.12.3 \
+    requests==2.31.5 \
+    pydantic==2.6.4 \
+    gunicorn==21.2.0
 
 # Copiar todo el código fuente del servidor
 COPY . .
 
-# Comando para ejecutar la aplicación con Gunicorn y UvicornWorker adaptado a FastAPI y el puerto de Render
+# Comando para ejecutar la aplicación con Gunicorn y UvicornWorker
 CMD sh -c "gunicorn main:app --bind 0.0.0.0:${PORT:-10000} -k uvicorn.workers.UvicornWorker --workers 2 --threads 4 --timeout 120"
