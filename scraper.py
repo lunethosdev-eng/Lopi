@@ -530,7 +530,7 @@ class AnimeScraper:
     def get_latest_episodes(self):
         all_episodes = []
         # Concurrencia masiva con ThreadPoolExecutor para velocidad extrema (< 2 segundos)
-        with ThreadPoolExecutor(max_workers=15) as executor:
+        with ThreadPoolExecutor(max_workers=20) as executor:
             futures = [executor.submit(self._fetch_target, target) for target in self.targets]
             for future in as_completed(futures):
                 res = future.result()
@@ -596,7 +596,7 @@ class AnimeScraper:
             return results
 
         # Búsqueda concurrente en paralelo sobre todos los proveedores
-        with ThreadPoolExecutor(max_workers=15) as executor:
+        with ThreadPoolExecutor(max_workers=20) as executor:
             futures = [executor.submit(search_single_target, target) for target in self.targets]
             for future in as_completed(futures):
                 res = future.result()
