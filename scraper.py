@@ -1,643 +1,242 @@
+"""
+Lopi Anime backend — adaptado con la arquitectura modular de Anime1v.
+Proveedores incluidos: AnimeFLV, JKAnime, TioAnime y MonosChinos.
+HentaiLA no está incluido. No se generan resultados ni streams ficticios.
+"""
+import base64
+import json
+import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urljoin, urlparse, quote_plus
 import cloudscraper
 from bs4 import BeautifulSoup
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from config import settings
+
+
+PROVIDERS = {
+    "animeflv": {"name": "AnimeFLV", "base": "https://www.animeflv.net", "search": "https://www.animeflv.net/browse?q={q}"},
+    "jkanime": {"name": "JKAnime", "base": "https://jkanime.net", "search": "https://jkanime.net/buscar/{q}/"},
+    "tioanime": {"name": "TioAnime", "base": "https://tioanime.com", "search": "https://tioanime.com/directorio?search={q}"},
+    "monoschinos": {"name": "MonosChinos", "base": "https://monoschinos2.com", "search": "https://monoschinos2.com/buscar?q={q}"},
+}
+HEADERS = {
+    **settings.HEADERS,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Referer": "https://www.google.com/",
+}
+CARD_SELECTORS = {
+    "animeflv": "article.Anime, .ListAnimes li article",
+    "jkanime": ".anime__item, .anime-item, .elemento, article",
+    "tioanime": "article.anime",
+    "monoschinos": ".item, article, .anime-item",
+}
+TITLE_SELECTORS = {
+    "animeflv": "h3.Title",
+    "jkanime": "h3, h2, .title",
+    "tioanime": "h3.title",
+    "monoschinos": "h2, h3, .title",
+}
+
+class ProviderError(Exception):
+    pass
 
 class AnimeScraper:
     def __init__(self):
-        # cloudscraper maneja automáticamente Cloudflare y retos de JavaScript
-        self.scraper = cloudscraper.create_scraper(
-            browser={'browser': 'chrome', 'platform': 'android', 'desktop': False}
+        self.session = cloudscraper.create_scraper(
+            browser={"browser": "chrome", "platform": "android", "desktop": False}
         )
-        
-        # Más de 50 proveedores clasificados por idioma y región
-        self.targets = [
-            # === ESPAÑOL / LATINO ===
-            {
-                "name": "AnimeFLV",
-                "lang": "Español",
-                "url": "https://animeflv.net",
-                "search_url": "https://animeflv.net/browse?q=",
-                "card_selector": "article.anime",
-                "title_selector": "h3",
-                "img_selector": "img"
-            },
-            {
-                "name": "Jkanime",
-                "lang": "Español",
-                "url": "https://jkanime.net",
-                "search_url": "https://jkanime.net/buscar/",
-                "card_selector": ".elemento",
-                "title_selector": "h3",
-                "img_selector": "img"
-            },
-            {
-                "name": "MonosChinos",
-                "lang": "Español",
-                "url": "https://monoschinos2.com",
-                "search_url": "https://monoschinos2.com/buscar?q=",
-                "card_selector": ".item",
-                "title_selector": "h2",
-                "img_selector": "img"
-            },
-            {
-                "name": "AnimeID",
-                "lang": "Español",
-                "url": "https://www.animeid.tv",
-                "search_url": "https://www.animeid.tv/search?q=",
-                "card_selector": ".anime-card",
-                "title_selector": "h3",
-                "img_selector": "img"
-            },
-            {
-                "name": "AnimeFenix",
-                "lang": "Español",
-                "url": "https://www.animefenix.tv",
-                "search_url": "https://www.animefenix.tv/animes?q=",
-                "card_selector": ".serie-card",
-                "title_selector": "h5",
-                "img_selector": "img"
-            },
-            {
-                "name": "AnimeBlix",
-                "lang": "Español",
-                "url": "https://animeblix.com",
-                "search_url": "https://animeblix.com/search?q=",
-                "card_selector": ".item",
-                "title_selector": "h3",
-                "img_selector": "img"
-            },
-            {
-                "name": "AnimeVibe",
-                "lang": "Español",
-                "url": "https://animevibe.cx",
-                "search_url": "https://animevibe.cx/search?q=",
-                "card_selector": ".anime-block",
-                "title_selector": "h4",
-                "img_selector": "img"
-            },
-            {
-                "name": "AnimeOnline360",
-                "lang": "Español",
-                "url": "https://animeonline360.me",
-                "search_url": "https://animeonline360.me/?s=",
-                "card_selector": ".manga-item",
-                "title_selector": "h3",
-                "img_selector": "img"
-            },
-            {
-                "name": "Compucalitv Anime",
-                "lang": "Español Latino",
-                "url": "https://www.compucalitv.com/?s=anime",
-                "search_url": "https://www.compucalitv.com/?s=",
-                "card_selector": ".item",
-                "title_selector": "h2",
-                "img_selector": "img"
-            },
-            {
-                "name": "Peliculotas / AnimeLatino",
-                "lang": "Español Latino",
-                "url": "https://animelatino.org",
-                "search_url": "https://animelatino.org/?s=",
-                "card_selector": "article",
-                "title_selector": "h2",
-                "img_selector": "img"
-            },
-            {
-                "name": "AnimeLatinoHD",
-                "lang": "Español Latino",
-                "url": "https://animelatinohd.com",
-                "search_url": "https://animelatinohd.com/?s=",
-                "card_selector": ".anime-box",
-                "title_selector": "h3",
-                "img_selector": "img"
-            },
-            {
-                "name": "Crunchyroll ES",
-                "lang": "Español / Sub",
-                "url": "https://www.crunchyroll.com/es",
-                "search_url": "https://www.crunchyroll.com/es/search?q=",
-                "card_selector": ".card",
-                "title_selector": "h4",
-                "img_selector": "img"
-            },
-            {
-                "name": "AnimeStix",
-                "lang": "Español",
-                "url": "https://animestix.site",
-                "search_url": "https://animestix.site/?s=",
-                "card_selector": ".post-item",
-                "title_selector": "h3",
-                "img_selector": "img"
-            },
-            {
-                "name": "AnimeMega",
-                "lang": "Español",
-                "url": "https://animemega.org",
-                "search_url": "https://animemega.org/?s=",
-                "card_selector": ".item",
-                "title_selector": "h2",
-                "img_selector": "img"
-            },
-            {
-                "name": "VerAnime",
-                "lang": "Español",
-                "url": "https://veranime.to",
-                "search_url": "https://veranime.to/animes?q=",
-                "card_selector": "article",
-                "title_selector": "h3",
-                "img_selector": "img"
-            },
-            {
-                "name": "AnimeSub",
-                "lang": "Español",
-                "url": "https://animesub.cc",
-                "search_url": "https://animesub.cc/?s=",
-                "card_selector": ".item",
-                "title_selector": "h3",
-                "img_selector": "img"
-            },
-            {
-                "name": "AnimeGatito",
-                "lang": "Español",
-                "url": "https://animegatito.com",
-                "search_url": "https://animegatito.com/?s=",
-                "card_selector": ".card",
-                "title_selector": "h2",
-                "img_selector": "img"
-            },
-            {
-                "name": "AnimeFenix Net",
-                "lang": "Español",
-                "url": "https://www.animefenix.com",
-                "search_url": "https://www.animefenix.com/animes?q=",
-                "card_selector": ".serie-card",
-                "title_selector": "h3",
-                "img_selector": "img"
-            },
-            {
-                "name": "AnimeHao",
-                "lang": "Español",
-                "url": "https://animehao.com",
-                "search_url": "https://animehao.com/?s=",
-                "card_selector": ".item",
-                "title_selector": "h2",
-                "img_selector": "img"
-            },
-            {
-                "name": "AnimeBlanco",
-                "lang": "Español",
-                "url": "https://animeblanco.com",
-                "search_url": "https://animeblanco.com/?s=",
-                "card_selector": ".anime-card",
-                "title_selector": "h3",
-                "img_selector": "img"
-            },
-            {
-                "name": "AnimePro",
-                "lang": "Español",
-                "url": "https://animepro.cc",
-                "search_url": "https://animepro.cc/?s=",
-                "card_selector": ".item",
-                "title_selector": "h3",
-                "img_selector": "img"
-            },
-            {
-                "name": "AnimeLatino Online",
-                "lang": "Español Latino",
-                "url": "https://animelatino.online",
-                "search_url": "https://animelatino.online/?s=",
-                "card_selector": "article",
-                "title_selector": "h3",
-                "img_selector": "img"
-            },
-            {
-                "name": "AnimeZeta",
-                "lang": "Español",
-                "url": "https://animezeta.com",
-                "search_url": "https://animezeta.com/?s=",
-                "card_selector": ".item",
-                "title_selector": "h2",
-                "img_selector": "img"
-            },
-            {
-                "name": "AnimeYugen",
-                "lang": "Español",
-                "url": "https://animeyugen.xyz",
-                "search_url": "https://animeyugen.xyz/?s=",
-                "card_selector": ".card",
-                "title_selector": "h3",
-                "img_selector": "img"
-            },
-            {
-                "name": "AnimeKino",
-                "lang": "Español",
-                "url": "https://animekino.net",
-                "search_url": "https://animekino.net/?s=",
-                "card_selector": ".item",
-                "title_selector": "h3",
-                "img_selector": "img"
-            },
+        self.timeout = 12
 
-            # === INGLÉS (SUB / DUB) ===
-            {
-                "name": "Gogoanime / Animesuge",
-                "lang": "Inglés",
-                "url": "https://animesuge.to",
-                "search_url": "https://animesuge.to/search?keyword=",
-                "card_selector": ".item",
-                "title_selector": ".name",
-                "img_selector": "img"
-            },
-            {
-                "name": "Zoro.to / AniWatch",
-                "lang": "Inglés",
-                "url": "https://aniwatch.to",
-                "search_url": "https://aniwatch.to/search?keyword=",
-                "card_selector": ".film-detail",
-                "title_selector": "h3",
-                "img_selector": "img"
-            },
-            {
-                "name": "9Anime Target",
-                "lang": "Inglés",
-                "url": "https://9animetv.to",
-                "search_url": "https://9animetv.to/search?keyword=",
-                "card_selector": ".flw-item",
-                "title_selector": "h3",
-                "img_selector": "img"
-            },
-            {
-                "name": "AnimePahe",
-                "lang": "Inglés",
-                "url": "https://animepahe.ru",
-                "search_url": "https://animepahe.ru/api?q=",
-                "card_selector": ".card",
-                "title_selector": "h3",
-                "img_selector": "img"
-            },
-            {
-                "name": "KickAssAnime",
-                "lang": "Inglés",
-                "url": "https://kickassanime.am",
-                "search_url": "https://kickassanime.am/search?q=",
-                "card_selector": ".anime-card",
-                "title_selector": "h4",
-                "img_selector": "img"
-            },
-            {
-                "name": "AnimeHeaven",
-                "lang": "Inglés",
-                "url": "https://animeheaven.me",
-                "search_url": "https://animeheaven.me/search.php?s=",
-                "card_selector": ".infobox",
-                "title_selector": "a",
-                "img_selector": "img"
-            },
-            {
-                "name": "Masterani",
-                "lang": "Inglés",
-                "url": "https://masterani.find",
-                "search_url": "https://masterani.find/search?q=",
-                "card_selector": ".anime-block",
-                "title_selector": "h3",
-                "img_selector": "img"
-            },
-            {
-                "name": "DarkAnime",
-                "lang": "Inglés",
-                "url": "https://darkanime.sub",
-                "search_url": "https://darkanime.sub/?s=",
-                "card_selector": ".post",
-                "title_selector": "h2",
-                "img_selector": "img"
-            },
-            {
-                "name": "Erai-raws",
-                "lang": "Inglés / Multi-Sub",
-                "url": "https://erai-raws.info",
-                "search_url": "https://erai-raws.info/?s=",
-                "card_selector": "tr",
-                "title_selector": "td",
-                "img_selector": "img"
-            },
-            {
-                "name": "SubsPlease",
-                "lang": "Inglés / Japonés",
-                "url": "https://subsplease.org",
-                "search_url": "https://subsplease.org/?s=",
-                "card_selector": ".release-row",
-                "title_selector": "h4",
-                "img_selector": "img"
-            },
-            {
-                "name": "TokyoInsider",
-                "lang": "Inglés / Japonés",
-                "url": "https://www.tokyoinsider.com",
-                "search_url": "https://www.tokyoinsider.com/search?q=",
-                "card_selector": ".list-item",
-                "title_selector": "a",
-                "img_selector": "img"
-            },
-            {
-                "name": "HiAnime",
-                "lang": "Inglés",
-                "url": "https://hianime.to",
-                "search_url": "https://hianime.to/search?keyword=",
-                "card_selector": ".film-detail",
-                "title_selector": "h3",
-                "img_selector": "img"
-            },
-            {
-                "name": "AnimeKai",
-                "lang": "Inglés",
-                "url": "https://animekai.to",
-                "search_url": "https://animekai.to/search?q=",
-                "card_selector": ".item",
-                "title_selector": "h3",
-                "img_selector": "img"
-            },
-            {
-                "name": "AnimeUltima",
-                "lang": "Inglés",
-                "url": "https://animeultima.to",
-                "search_url": "https://animeultima.to/search?q=",
-                "card_selector": ".anime-card",
-                "title_selector": "h4",
-                "img_selector": "img"
-            },
-            {
-                "name": "AnimeDao Target",
-                "lang": "Inglés",
-                "url": "https://animedao.to",
-                "search_url": "https://animedao.to/?s=",
-                "card_selector": ".card",
-                "title_selector": "h3",
-                "img_selector": "img"
-            },
-            {
-                "name": "Chia-Anime",
-                "lang": "Inglés",
-                "url": "https://www.chia-anime.me",
-                "search_url": "https://www.chia-anime.me/search/?s=",
-                "card_selector": ".item",
-                "title_selector": "h3",
-                "img_selector": "img"
-            },
-            {
-                "name": "AnimeFrenzy",
-                "lang": "Inglés",
-                "url": "https://animefrenzy.org",
-                "search_url": "https://animefrenzy.org/?s=",
-                "card_selector": ".series",
-                "title_selector": "h3",
-                "img_selector": "img"
-            },
-            {
-                "name": "Wcostream",
-                "lang": "Inglés (Dub)",
-                "url": "https://www.wcostream.tv",
-                "search_url": "https://www.wcostream.tv/search?s=",
-                "card_selector": ".cat-item",
-                "title_selector": "h3",
-                "img_selector": "img"
-            },
-            {
-                "name": "Anime Karma",
-                "lang": "Inglés",
-                "url": "https://animekarma.com",
-                "search_url": "https://animekarma.com/?s=",
-                "card_selector": ".post",
-                "title_selector": "h2",
-                "img_selector": "img"
-            },
-            {
-                "name": "Anime Twist",
-                "lang": "Inglés",
-                "url": "https://twist.moe",
-                "search_url": "https://twist.moe/search?q=",
-                "card_selector": ".serie",
-                "title_selector": "h3",
-                "img_selector": "img"
-            },
+    def _get(self, url):
+        if not url or not url.startswith(("http://", "https://")):
+            raise ProviderError("URL no válida")
+        response = self.session.get(url, headers=HEADERS, timeout=self.timeout,
+                                    allow_redirects=True)
+        response.raise_for_status()
+        return response.text, response.url
 
-            # === JAPONÉS / OTROS IDIOMAS ===
-            {
-                "name": "Abema TV Anime",
-                "lang": "Japonés",
-                "url": "https://abema.tv/video/genre/animation",
-                "search_url": "https://abema.tv/search?q=",
-                "card_selector": ".com-video-Card",
-                "title_selector": "h4",
-                "img_selector": "img"
-            },
-            {
-                "name": "NicoNico Anime",
-                "lang": "Japonés",
-                "url": "https://ch.nicovideo.jp/anime",
-                "search_url": "https://ch.nicovideo.jp/search/",
-                "card_selector": ".item",
-                "title_selector": "a",
-                "img_selector": "img"
-            },
-            {
-                "name": "BS11 Anime",
-                "lang": "Japonés",
-                "url": "https://www.bs11.jp/anime/",
-                "search_url": "https://www.bs11.jp/search/?q=",
-                "card_selector": ".program-box",
-                "title_selector": "h3",
-                "img_selector": "img"
-            },
-            {
-                "name": "U-NEXT Anime",
-                "lang": "Japonés",
-                "url": "https://video.unext.jp/genre/anime",
-                "search_url": "https://video.unext.jp/lucid/search?query=",
-                "card_selector": "li",
-                "title_selector": "p",
-                "img_selector": "img"
-            },
-            {
-                "name": "DMM TV Anime",
-                "lang": "Japonés",
-                "url": "https://tv.dmm.com/vod/genre/anime/",
-                "search_url": "https://tv.dmm.com/vod/search/?query=",
-                "card_selector": ".listItem",
-                "title_selector": "span",
-                "img_selector": "img"
-            },
-            {
-                "name": "Bandai Channel",
-                "lang": "Japonés",
-                "url": "https://www.b-ch.com",
-                "search_url": "https://www.b-ch.com/search/list/?keyword=",
-                "card_selector": ".workBox",
-                "title_selector": "h3",
-                "img_selector": "img"
-            },
-            {
-                "name": "D Anime Store",
-                "lang": "Japonés",
-                "url": "https://animestore.docomo.ne.jp",
-                "search_url": "https://animestore.docomo.ne.jp/animestore/sch_str?search=1&keyword=",
-                "card_selector": ".itemBlock",
-                "title_selector": "p",
-                "img_selector": "img"
-            }
-        ]
+    def _absolute(self, value, base):
+        return urljoin(base, value) if value else None
 
-    def _fetch_target(self, target):
-        episodes = []
-        try:
-            response = self.scraper.get(target["url"], headers=settings.HEADERS, timeout=3)
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.text, 'html.parser')
-                items = soup.select(target["card_selector"])[:5]
-                
-                for item in items:
-                    title_el = item.select_one(target["title_selector"]) or item.find('a')
-                    link_el = item.find('a')
-                    img_el = item.find(target["img_selector"]) if target.get("img_selector") else item.find('img')
-                    
-                    title = title_el.text.strip() if title_el else "Estreno Anime"
-                    if not title or len(title) < 2:
-                        continue
+    def _provider_for_url(self, url):
+        host = (urlparse(url).hostname or "").lower()
+        for key, p in PROVIDERS.items():
+            base_host = urlparse(p["base"]).hostname
+            if host == base_host or host.endswith("." + base_host):
+                return key
+        raise ProviderError("Proveedor no compatible. Usa AnimeFLV, JKAnime, TioAnime o MonosChinos.")
 
-                    link = link_el['href'] if link_el and link_el.has_attr('href') else ""
-                    if link and not link.startswith('http'):
-                        link = target["url"] + link
+    def _parse_cards(self, html, provider):
+        p = PROVIDERS[provider]
+        soup = BeautifulSoup(html, "html.parser")
+        results, seen = [], set()
+        for card in soup.select(CARD_SELECTORS[provider]):
+            a = card.select_one("a[href]")
+            title_el = card.select_one(TITLE_SELECTORS[provider]) or card.select_one("a[title], img[alt]")
+            title = (title_el.get("title") if title_el and title_el.name in ("a","img") else
+                     title_el.get("alt") if title_el and title_el.name == "img" else
+                     title_el.get_text(" ", strip=True) if title_el else "")
+            if not title and a:
+                title = a.get("title") or a.get_text(" ", strip=True)
+            href = a.get("href") if a else None
+            if not title or not href:
+                continue
+            link = self._absolute(href, p["base"])
+            if link in seen:
+                continue
+            seen.add(link)
+            img = card.select_one("img")
+            image = None
+            if img:
+                image = self._absolute(img.get("data-src") or img.get("data-lazy-src") or img.get("src"), p["base"])
+            results.append({
+                "id": None, "title": title.strip(), "slug": link.rstrip("/").split("/")[-1],
+                "url": link, "link": link, "image": image, "backdrop": None,
+                "type": (card.select_one(".Type") or card.select_one(".anime-type-serie, .anime-type-peli")).get_text(" ", strip=True)
+                        if card.select_one(".Type, .anime-type-serie, .anime-type-peli") else "Anime",
+                "provider": p["name"], "language": "Español / Sub"
+            })
+        return results
 
-                    img = ""
-                    if img_el:
-                        img = img_el.get('data-src') or img_el.get('src') or ""
-                    if img and not img.startswith('http'):
-                        img = target["url"] + img
-                    if not img:
-                        img = "https://images.unsplash.com/photo-1578632767115-351597cf2477?w=500"
+    def search_anime(self, query, provider=None):
+        q = (query or "").strip()
+        if len(q) < 2:
+            return {"success": False, "error": "Escribe al menos 2 caracteres", "data": []}
+        selected = [provider] if provider in PROVIDERS else list(PROVIDERS)
+        found, errors = [], []
+        with ThreadPoolExecutor(max_workers=min(4, len(selected))) as pool:
+            jobs = {pool.submit(self._search_one, key, q): key for key in selected}
+            for future in as_completed(jobs):
+                key = jobs[future]
+                try:
+                    found.extend(future.result())
+                except Exception as exc:
+                    errors.append({"provider": key, "error": str(exc)[:180]})
+        # Deduplicar por título normalizado + URL
+        unique, seen = [], set()
+        for item in found:
+            key = re.sub(r"[^a-z0-9]", "", item["title"].lower())
+            if key and key not in seen:
+                seen.add(key); unique.append(item)
+        return {"success": True, "query": q, "count": len(unique), "data": unique,
+                "providers_checked": selected, "provider_errors": errors}
 
-                    episodes.append({
-                        "provider": target["name"],
-                        "language": target["lang"],
-                        "title": title,
-                        "link": link,
-                        "image": img
-                    })
-        except Exception:
-            pass
-        return episodes
+    def _search_one(self, key, q):
+        url = PROVIDERS[key]["search"].format(q=quote_plus(q))
+        html, final_url = self._get(url)
+        # Provider base is immutable; avoids races between parallel searches.
+        return self._parse_cards(html, key)
 
     def get_latest_episodes(self):
-        all_episodes = []
-        # Concurrencia masiva con ThreadPoolExecutor para velocidad extrema (< 2 segundos)
-        with ThreadPoolExecutor(max_workers=20) as executor:
-            futures = [executor.submit(self._fetch_target, target) for target in self.targets]
-            for future in as_completed(futures):
-                res = future.result()
-                if res:
-                    all_episodes.extend(res)
-
-        if not all_episodes:
-            all_episodes = [{
-                "provider": "Oxy High Speed Backup",
-                "language": "Español / Sub",
-                "title": "Solo Leveling - Alta Velocidad",
-                "link": "https://animeflv.net",
-                "image": "https://images.unsplash.com/photo-1607604276583-eef5d076aa5f?w=500"
-            }]
-
-        return {"success": True, "total_providers": len(self.targets), "data": all_episodes}
-
-    def search_anime(self, query: str):
-        query_lower = query.lower()
-        search_results = []
-
-        def search_single_target(target):
-            results = []
-            if "search_url" not in target:
-                return results
+        # Home pages are not all episode feeds; parse real cards only.
+        candidates = []
+        for key in ("animeflv", "tioanime", "monoschinos"):
             try:
-                target_search_url = target["search_url"] + query
-                response = self.scraper.get(target_search_url, headers=settings.HEADERS, timeout=4)
-                if response.status_code == 200:
-                    soup = BeautifulSoup(response.text, 'html.parser')
-                    items = soup.select(target["card_selector"])[:5]
-
-                    for item in items:
-                        title_el = item.select_one(target["title_selector"]) or item.find('a')
-                        link_el = item.find('a')
-                        img_el = item.find(target["img_selector"]) if target.get("img_selector") else item.find('img')
-
-                        title = title_el.text.strip() if title_el else ""
-                        if not title:
-                            continue
-
-                        link = link_el['href'] if link_el and link_el.has_attr('href') else ""
-                        if link and not link.startswith('http'):
-                            link = target["url"] + link
-
-                        img = ""
-                        if img_el:
-                            img = img_el.get('data-src') or img_el.get('src') or ""
-                        if img and not img.startswith('http'):
-                            img = target["url"] + img
-                        if not img:
-                            img = "https://images.unsplash.com/photo-1578632767115-351597cf2477?w=500"
-
-                        results.append({
-                            "provider": target["name"],
-                            "language": target["lang"],
-                            "title": title,
-                            "link": link,
-                            "image": img
-                        })
+                html, _ = self._get(PROVIDERS[key]["base"])
+                candidates.extend(self._parse_cards(html, key)[:12])
             except Exception:
-                pass
-            return results
+                continue
+        return {"success": True, "total_providers": 3, "data": candidates,
+                "message": None if candidates else "No se pudo obtener catálogo de los proveedores ahora mismo."}
 
-        # Búsqueda concurrente en paralelo sobre todos los proveedores
-        with ThreadPoolExecutor(max_workers=20) as executor:
-            futures = [executor.submit(search_single_target, target) for target in self.targets]
-            for future in as_completed(futures):
-                res = future.result()
-                if res:
-                    search_results.extend(res)
+    def get_anime_info(self, url):
+        key = self._provider_for_url(url)
+        html, final_url = self._get(url)
+        soup = BeautifulSoup(html, "html.parser")
+        title = (soup.select_one("h1.title") or soup.select_one("h1"))
+        description = (soup.select_one("p.sinopsis") or soup.select_one(".Description") or
+                       soup.select_one(".Anime-Description") or soup.select_one(".description"))
+        image = soup.select_one(".AnimeCover img, .cover img, .Anime img, img.cover")
+        genres = []
+        for el in soup.select(".Nvgnrs a, .ListAnmRel a, .genres a, a[href*='genero']"):
+            name = el.get_text(" ", strip=True)
+            if name and name not in genres: genres.append(name)
+        episodes, seen = [], set()
+        for a in soup.select("a[href*='/ver/']"):
+            href = self._absolute(a.get("href"), final_url)
+            number = self._episode_number(href)
+            if number is None or href in seen: continue
+            seen.add(href)
+            episodes.append({"id": None, "number": number, "title": f"Episodio {number}", "url": href})
+        # AnimeFLV/TioAnime expose episode arrays in page scripts.
+        if not episodes:
+            for script in soup.find_all("script"):
+                text = script.string or script.get_text()
+                match = re.search(r"episodes\s*=\s*(\[[\s\S]*?\])", text)
+                if match:
+                    try:
+                        nums = json.loads(match.group(1))
+                        for n in nums:
+                            if isinstance(n, (int,float)):
+                                episodes.append({"id": None, "number": int(n),
+                                                 "title": f"Episodio {int(n)}",
+                                                 "url": self._episode_url(final_url, int(n))})
+                    except Exception: pass
+        episodes.sort(key=lambda x: x["number"])
+        return {"success": True, "source": key, "data": {
+            "id": None, "title": title.get_text(" ", strip=True) if title else None,
+            "description": description.get_text(" ", strip=True) if description else None,
+            "image": self._absolute(image.get("data-src") or image.get("src"), final_url) if image else None,
+            "genres": [{"id": None, "name": g, "slug": re.sub(r"\s+","-",g.lower())} for g in genres],
+            "totalEpisodes": len(episodes), "episodes": episodes, "url": final_url
+        }}
 
-        if not search_results:
-            latest = self.get_latest_episodes().get("data", [])
-            search_results = [item for item in latest if query_lower in item["title"].lower()]
+    def _episode_url(self, anime_url, number):
+        parsed = urlparse(anime_url)
+        slug = parsed.path.rstrip("/").split("/")[-1]
+        slug = re.sub(r"-\d+$", "", slug)
+        if parsed.path.startswith("/anime/"):
+            return f"{parsed.scheme}://{parsed.netloc}/ver/{slug}-{number}"
+        return f"{parsed.scheme}://{parsed.netloc}/ver/{slug}-{number}"
 
-        if not search_results:
-            search_results = [{
-                "provider": "Oxy Search Engine",
-                "language": "Multi",
-                "title": f"Resultado para: {query.capitalize()}",
-                "link": "https://animeflv.net",
-                "image": "https://images.unsplash.com/photo-1618336753974-aae8e04506aa?w=500"
-            }]
+    def _episode_number(self, url):
+        if not url: return None
+        m = re.search(r"(\d+)(?:/)?$", urlparse(url).path)
+        return int(m.group(1)) if m else None
 
-        return {"success": True, "query": query, "data": search_results}
+    def get_episode_sources(self, episode_link):
+        # A link is required. Never return sample MP4 files as if they were anime.
+        if not episode_link:
+            return {"success": False, "error": "Se requiere el enlace del episodio"}
+        key = self._provider_for_url(episode_link)
+        html, final_url = self._get(episode_link)
+        soup = BeautifulSoup(html, "html.parser")
+        sources, seen = [], set()
+        # Parse the site's own video metadata, if exposed.
+        for script in soup.find_all("script"):
+            body = script.string or script.get_text()
+            match = re.search(r"videos\s*=\s*(\{[\s\S]*?\});", body)
+            if match:
+                raw = match.group(1)
+                try:
+                    data = json.loads(raw.replace("\\/", "/"))
+                except Exception:
+                    data = None
+                if isinstance(data, dict):
+                    for variant, rows in data.items():
+                        if not isinstance(rows, list): continue
+                        for row in rows:
+                            if not isinstance(row, dict): continue
+                            raw_url = row.get("code") or row.get("url") or row.get("embed") or row.get("file")
+                            if raw_url and isinstance(raw_url, str):
+                                try:
+                                    decoded = base64.b64decode(raw_url).decode("utf-8")
+                                    if decoded.startswith(("http://","https://")): raw_url = decoded
+                                except Exception: pass
+                                self._add_source(sources, seen, row.get("title") or row.get("server") or "Servidor",
+                                                 self._absolute(raw_url, final_url), variant)
+        # Iframes and video tags are returned as embeds, not falsely labeled as direct media.
+        for el in soup.select("iframe[src], video[src], video source[src]"):
+            src = self._absolute(el.get("src"), final_url)
+            if src: self._add_source(sources, seen, "Embed", src, "SUB")
+        return {"success": True, "source": key, "episode_link": final_url,
+                "episode": self._episode_number(final_url),
+                "sources": sources,
+                "message": None if sources else "La página no expuso servidores reproducibles. Puede requerir cambios del proveedor."}
 
-    def get_episode_sources(self, episode_link: str):
-        try:
-            sources = [
-                {
-                    "quality": "1080p HD", 
-                    "url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4", 
-                    "audio": "Japonés", 
-                    "sub": "Español"
-                },
-                {
-                    "quality": "720p SD", 
-                    "url": "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/Sintel.mp4", 
-                    "audio": "Español Latino", 
-                    "sub": "Desactivados"
-                }
-            ]
-            return {
-                "success": True,
-                "episode_link": episode_link,
-                "sources": sources
-            }
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+    def _add_source(self, target, seen, server, url, variant):
+        if not url or not url.startswith(("http://","https://")) or url in seen: return
+        seen.add(url)
+        target.append({"server": server, "url": url, "audio": "Japonés",
+                       "sub": "Español" if "sub" in str(variant).lower() else "No especificado",
+                       "variant": str(variant).upper()})
