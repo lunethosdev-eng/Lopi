@@ -9,7 +9,7 @@ import re
 import time
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import urljoin, urlparse, quote_plus
+from urllib.parse import urljoin, urlparse, quote_plus, parse_qsl, urlencode, urlunparse, unquote
 from threading import RLock
 
 import cloudscraper
@@ -177,9 +177,15 @@ class AnimeScraper:
         return self._store(key, {"success": bool(results), "total": len(results), "data": results, "providers": statuses,
                                  "error": None if results else "No hay proveedores disponibles"})
 
-    def _latest_provider(self, provider):
-        response = self._get(provider["base"])
-        return self._parse_cards(response.text, provider, limit=20)
+    def _latest_provider(self, provider, page=1):
+        page_url = provider["base"]
+        if page > 1:
+            parsed = urlparse(page_url)
+            query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+            query["page"] = str(page)
+            page_url = urlunparse(parsed._replace(query=urlencode(query)))
+        response = self._get(page_url)
+        return self._parse_cards(response.text, provider, limit=30)
 
     def get_anime_info(self, anime_url: str):
         anime_url = self._validate_url(anime_url)
@@ -211,14 +217,14 @@ class AnimeScraper:
             if re.search(r"(episod|cap[ií]tulo|episode|\bep\.?\s*\d+|/\d+/?$)", href + " " + text, re.I):
                 seen.add(href)
                 season_match = re.search(r"(?:temporada|season|s)\s*(\d+)", text + " " + href, re.I)
-                season_number = int(season_match.group(1)) if season_match else 1
+                season_number = int(season_match.group(1)) if season_match else None
                 episodes.append({"id": f"{provider['id']}:{href}", "number": self._episode_number(text, href), "season": season_number, "title": text,
                                  "url": href, "provider": provider["name"], "providerId": provider["id"]})
-        episodes.sort(key=lambda x: (x["season"], x["number"] is None, x["number"] or 0, x["title"]))
+        episodes.sort(key=lambda x: (x["season"] is None, x["season"] or 0, x["number"] is None, x["number"] or 0, x["title"]))
         grouped = {}
         for episode in episodes:
             grouped.setdefault(episode["season"], []).append(episode)
-        seasons = [{"number": number, "title": f"Temporada {number}", "episodes": items} for number, items in sorted(grouped.items())]
+        seasons = [{"number": number, "title": f"Temporada {number}" if number is not None else "Temporada sin identificar", "episodes": items} for number, items in sorted(grouped.items(), key=lambda item: (item[0] is None, item[0] or 0))]
         info = {"success": True, "id": f"{provider['id']}:{anime_url}", "title": title_text, "name": title_text,
                 "description": description, "image": image, "url": anime_url, "provider": provider["name"],
                 "providerId": provider["id"], "language": provider["language"], "seasons": seasons,
@@ -245,43 +251,166 @@ class AnimeScraper:
         except (ValueError, AttributeError):
             return None
 
+    @staticmethod
+    def _media_type(url: str, label: str = "") -> str:
+        """Classify only explicit media URLs; an iframe/page is never called a video."""
+        parsed = urlparse(url)
+        path = unquote(parsed.path).lower()
+        query = (parsed.query + " " + label).lower()
+        if path.endswith((".m3u8", ".m3u")) or re.search(r"(?:format|type|mime)=?(?:%2F|/)mpegurl|m3u8", query):
+            return "hls"
+        if path.endswith(".mp4") or re.search(r"(?:format|type|mime)=?video%2Fmp4|video/mp4", query):
+            return "mp4"
+        if path.endswith((".mpd",)):
+            return "dash"
+        return "embed"
+
     def get_episode_sources(self, episode_link: str):
         episode_url = self._validate_url(episode_link)
         key = "episode:" + episode_url
         cached = self._cached(key)
         if cached is not None:
             return cached
+
         response = self._get(episode_url)
         soup = BeautifulSoup(response.text, "html.parser")
         provider = self._provider_for_url(episode_url)
-        sources, seen = [], set()
-        candidates = []
-        for node in soup.select("iframe[src], iframe[data-src], video[src], video source[src], source[src], a[href]"):
-            value = node.get("src") or node.get("data-src") or node.get("href")
-            url = self._absolute(episode_url, value)
-            if not url or url in seen or urlparse(url).scheme not in ("http", "https"):
-                continue
+        candidates, seen = [], set()
+
+        def add_candidate(raw_url, node=None, label=""):
+            url = self._absolute(episode_url, raw_url)
+            if not url or url in seen:
+                return
+            parsed = urlparse(url)
+            if parsed.scheme not in ("http", "https") or not parsed.hostname:
+                return
+            # Do not return javascript/data URLs or links to unrelated navigation pages.
+            if parsed.hostname.lower() in {"localhost", "127.0.0.1"}:
+                return
             seen.add(url)
-            candidates.append((url, node))
-        for url, node in candidates:
-            lower = url.lower().split("?")[0]
-            media_type = "hls" if ".m3u8" in lower else "mp4" if ".mp4" in lower else "embed"
-            label = " ".join([node.get("title", ""), node.get("aria-label", ""), node.get_text(" ", strip=True)]).strip()
-            language = self._audio_language(label + " " + url)
-            if media_type == "embed" and not any(host in urlparse(url).netloc.lower() for host in settings.EMBED_HOST_ALLOWLIST):
-                # Keep provider-owned iframe embeds and explicit media links; discard arbitrary page links.
-                if node.name == "a" or urlparse(url).netloc == urlparse(episode_url).netloc:
+            node_label = label
+            if node is not None:
+                node_label = " ".join(filter(None, [
+                    node.get("title", ""), node.get("aria-label", ""),
+                    node.get("data-audio", ""), node.get("data-lang", ""),
+                    node.get("data-server", ""), node.get_text(" ", strip=True), label
+                ]))
+            candidates.append((url, node, node_label.strip()))
+
+        # Real media and embed elements only. Do not treat every anchor on the page as a server.
+        selectors = (
+            "iframe[src], iframe[data-src], iframe[data-lazy-src], "
+            "video[src], video source[src], source[src], "
+            "[data-video], [data-embed], [data-src*='.m3u8'], [data-src*='.mp4']"
+        )
+        for node in soup.select(selectors):
+            value = (node.get("src") or node.get("data-src") or node.get("data-lazy-src")
+                     or node.get("data-video") or node.get("data-embed"))
+            add_candidate(value, node)
+
+        # Some providers serialize player URLs in script JSON. Extract only URLs whose
+        # surrounding text indicates a player/media/server field.
+        for script in soup.find_all("script"):
+            raw = script.string or script.get_text(" ", strip=False) or ""
+            if not raw or not re.search(r"(?:file|source|src|embed|player|video|hls|m3u8)", raw, re.I):
+                continue
+            for match in re.finditer(r"https?:\\?/\\?/[A-Za-z0-9._~:/?#\[\]@!$&()*+,;=%-]+", raw):
+                candidate = match.group(0).replace("\\/", "/").rstrip(",;)")
+                before = raw[max(0, match.start() - 180):match.start()]
+                after = raw[match.end():match.end() + 100]
+                context = before + " " + after
+                if re.search(r"(?:file|source|src|embed|player|video|hls|m3u8)", context, re.I):
+                    add_candidate(candidate, None, context)
+
+        subtitle_tracks = []
+        for track in soup.select("track[src]"):
+            track_url = self._absolute(episode_url, track.get("src"))
+            if not track_url:
+                continue
+            subtitle_tracks.append({
+                "url": track_url,
+                "label": track.get("label") or track.get("srclang") or "Subtítulos",
+                "language": track.get("srclang") or "und",
+                "kind": track.get("kind") or "subtitles",
+                "default": track.has_attr("default"),
+            })
+
+        sources = []
+        for url, node, label in candidates:
+            media_type = self._media_type(url, label)
+            host = urlparse(url).hostname or ""
+            # A direct stream is playable by the HTML player. A server page is an embed
+            # and must be loaded in an iframe, never assigned to <video src>.
+            is_direct = media_type in ("hls", "mp4")
+            if media_type == "embed":
+                # Filter out provider's own episode/detail links and random external links.
+                if node is None and not re.search(r"player|embed|server|video|file|source", label, re.I):
                     continue
-            sources.append({"id": f"{provider['id']}:{len(sources)+1}", "server": urlparse(url).netloc,
-                            "provider": provider["name"], "url": url, "streamUrl": url,
-                            "type": media_type, "mediaType": media_type, "quality": self._quality(label + " " + url),
-                            "audio": language, "language": language, "subtitle": "Español" if re.search(r"sub|español|spanish", label + " " + url, re.I) else "No especificado",
-                            "resolved": media_type in ("hls", "mp4")})
-        audio_options = sorted({source["audio"] for source in sources if source["audio"] != "No especificado"})
-        result = {"success": bool(sources), "episode_link": episode_url, "provider": provider["name"],
-                  "sources": sources, "total": len(sources), "audioOptions": audio_options,
-                  "error": None if sources else "El proveedor no expuso enlaces de reproducción detectables"}
+                if node is not None and node.name == "a":
+                    continue
+                if node is not None and node.name not in ("iframe", "video", "source") and not any(
+                    node.has_attr(attr) for attr in ("data-video", "data-embed")
+                ):
+                    continue
+            language = self._audio_language(label + " " + url)
+            subtitle = "Español" if re.search(r"subtit|subbed|español|spanish|\bsub\b", label + " " + url, re.I) else "No especificado"
+            sources.append({
+                "id": f"{provider['id']}:{len(sources) + 1}",
+                "server": host,
+                "provider": provider["name"],
+                "url": url,
+                "streamUrl": url if is_direct else None,
+                "embedUrl": url if not is_direct else None,
+                "type": media_type,
+                "mediaType": media_type,
+                "kind": "direct" if is_direct else "embed",
+                "playable": is_direct,
+                "requiresIframe": not is_direct,
+                "quality": self._quality(label + " " + url),
+                "audio": language,
+                "language": language,
+                "subtitle": subtitle,
+                "referer": episode_url,
+                "tracks": subtitle_tracks,
+                "resolved": is_direct,
+            })
+
+        # Directly exposed <video> URLs can be relative and may be missed by script parsing;
+        # no synthetic fallback is ever inserted here.
+        audio_options = sorted({x["audio"] for x in sources if x["audio"] != "No especificado"})
+        result = {
+            "success": bool(sources),
+            "episode_link": episode_url,
+            "provider": provider["name"],
+            "sources": sources,
+            "total": len(sources),
+            "audioOptions": audio_options,
+            "subtitleTracks": subtitle_tracks,
+            "playableCount": sum(1 for x in sources if x["playable"]),
+            "embedCount": sum(1 for x in sources if x["requiresIframe"]),
+            "error": None if sources else "No se detectaron servidores ni enlaces de vídeo en el HTML del episodio",
+            "message": "Los servidores embed deben abrirse en iframe; solo HLS/MP4 directos se asignan al elemento video."
+        }
         return self._store(key, result, ttl=180)
+
+    def resolve_source(self, source_url: str):
+        """Classify a URL without pretending an embed page is a direct video."""
+        parsed = urlparse(source_url or "")
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            raise ValueError("Se requiere una URL http(s) válida")
+        host = parsed.hostname.lower()
+        if host in ("localhost", "127.0.0.1", "::1") or host.endswith((".local", ".internal")):
+            raise ValueError("Host no permitido")
+        media_type = self._media_type(source_url)
+        direct = media_type in ("hls", "mp4")
+        return {
+            "success": True, "server": host, "mediaType": media_type,
+            "streamUrl": source_url if direct else None,
+            "embedUrl": None if direct else source_url,
+            "direct": direct,
+            "requiresIframe": not direct,
+            "message": None if direct else "Es una página de servidor; debe abrirse como embed, no como video src."
+        }
 
     @staticmethod
     def _audio_language(value):
@@ -318,13 +447,14 @@ class AnimeScraper:
         return {"id": "external", "name": host, "language": "No especificado"}
 
     def get_catalog(self, page=1, provider_id=None):
+        page = max(1, int(page or 1))
         if provider_id:
             provider = next((p for p in PROVIDERS if p["id"] == provider_id.lower()), None)
             if not provider:
                 return {"success": False, "data": [], "error": "Proveedor desconocido"}
             try:
-                items = self._latest_provider(provider)
-                return {"success": True, "provider": provider["name"], "page": 1, "total": len(items), "data": items}
+                items = self._latest_provider(provider, page=page)
+                return {"success": True, "provider": provider["name"], "page": page, "total": len(items), "data": items}
             except Exception as exc:
                 return {"success": False, "provider": provider["name"], "data": [], "error": str(exc)}
         return self.get_latest_episodes()
