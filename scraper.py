@@ -1,56 +1,40 @@
 import cloudscraper
 from bs4 import BeautifulSoup
+from config import settings
 
 class AnimeScraper:
     def __init__(self):
-        # cloudscraper maneja automáticamente los retos de Cloudflare (JavaScript / Cookies)
+        # cloudscraper maneja automáticamente los retos de JavaScript de Cloudflare
         self.scraper = cloudscraper.create_scraper(
-            browser={
-                'browser': 'firefox',
-                'platform': 'android',
-                'desktop': False
-            }
+            browser={'browser': 'chrome', 'platform': 'android', 'desktop': False}
         )
-        self.base_url = "https://tu-sitio-de-anime-ejemplo.com" # Reemplaza con la fuente real
 
     def get_latest_episodes(self):
+        url = "https://your-anime-target-site.com" # Reemplaza con la fuente objetivo
         try:
-            response = self.scraper.get(self.base_url)
+            response = self.scraper.get(url, headers=settings.HEADERS)
             if response.status_code != 200:
-                return {"error": "No se pudo conectar con la fuente", "status": response.status_code}
+                return {"error": "No se pudo conectar con el sitio de anime", "status": response.status_code}
             
             soup = BeautifulSoup(response.text, 'html.parser')
             episodes = []
-
-            # Selector de ejemplo para extraer elementos (ajústalo según la página objetivo)
-            for item in soup.select('.anime-card-class'):
-                title = item.find('h3').get_text(strip=True) if item.find('h3') else "Sin título"
+            
+            # Ejemplo de parsing (ajustar selectores según la web objetivo)
+            for item in soup.select('.anime-card-class')[:20]:
+                title = item.select_h2.text.strip() if item.select_h2 else "Sin título"
                 link = item.find('a')['href'] if item.find('a') else ""
-                image = item.find('img')['src'] if item.find('img') else ""
+                episodes.append({"title": title, "link": link})
                 
-                episodes.append({
-                    "title": title,
-                    "link": link,
-                    "image": image
-                })
-
             return {"success": True, "data": episodes}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    def get_episode_servers(self, episode_url):
-        try:
-            response = self.scraper.get(episode_url)
-            soup = BeautifulSoup(response.text, 'html.parser')
-            servers = []
-
-            # Extraer reproductores de video (iframe, links directos mp4, m3u8)
-            for server in soup.select('.player-server-selector'):
-                servers.append({
-                    "name": server.get_text(strip=True),
-                    "url": server.get('data-video', '')
-                })
-
-            return {"success": True, "servers": servers}
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+    def get_episode_sources(self, episode_id: str):
+        # Lógica para extraer los servidores de video (mp4/m3u8), audios y subtítulos
+        return {
+            "episode_id": episode_id,
+            "sources": [
+                {"quality": "1080p", "url": "https://example.com/video_1080p.mp4", "audio": "Japonés", "sub": "Español"},
+                {"quality": "720p", "url": "https://example.com/video_720p.mp4", "audio": "Español Latino", "sub": "Desactivados"}
+            ]
+        }
