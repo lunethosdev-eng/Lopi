@@ -1,0 +1,15 @@
+{
+  "web": [
+    {"id":"animeflv","name":"AnimeFLV","base":"https://animeflv.net","search":"https://animeflv.net/browse?q={query}","selectors":"article.anime, .Anime, .ListAnimes-item, .anime","language":"es"},
+    {"id":"jkanime","name":"JKAnime","base":"https://jkanime.net","search":"https://jkanime.net/buscar/{query}/","selectors":".elemento, .anime, .anime__item, article","language":"es"},
+    {"id":"tioanime","name":"TioAnime","base":"https://tioanime.com","search":"https://tioanime.com/directorio?q={query}","selectors":".anime, .item, article","language":"es"},
+    {"id":"monoschinos","name":"MonosChinos","base":"https://monoschinos2.com","search":"https://monoschinos2.com/buscar?q={query}","selectors":".item, .anime, article","language":"es"},
+    {"id":"animeav1","name":"AnimeAV1","base":"https://animeav1.com","search":"https://animeav1.com/catalogo?q={query}","selectors":"a[href*='/media/']","language":"multi","adapter":"sveltekit"}
+  ],
+  "metadata_apis": [
+    {"id":"anilist","name":"AniList","base":"https://graphql.anilist.co","kind":"graphql","language":"multi"},
+    {"id":"jikan","name":"Jikan / MyAnimeList","base":"https://api.jikan.moe/v4","kind":"rest","language":"multi"},
+    {"id":"kitsu","name":"Kitsu","base":"https://kitsu.io/api/edge","kind":"rest","language":"multi"}
+  ],
+  "policy": "Only public catalog metadata and explicitly exposed, non-DRM direct media URLs are eligible. Provider availability and rights must be checked independently. No CAPTCHA, login, paywall, anti-bot, or DRM bypass."
+}
