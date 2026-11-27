@@ -1,19 +1,11 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from scraper import AnimeScraper
+from scraper import AnimeScraper, ProviderError
 from keep_alive import start_keep_alive
 
-app = FastAPI(title="Oxy Anime Backend", version="1.0.0")
-
-# Configuración abierta de CORS para evitar bloqueos con la web de prueba y la APK
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
+app = FastAPI(title="Lopi Anime API", version="2.0.0")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False,
+                   allow_methods=["GET"], allow_headers=["*"])
 scraper = AnimeScraper()
 
 @app.on_event("startup")
@@ -21,25 +13,47 @@ def startup_event():
     start_keep_alive()
 
 @app.get("/")
-def read_root():
-    return {"message": "Bienvenido al Backend de Oxy Anime 🚀", "status": "online"}
+def root():
+    return {"message": "Lopi Anime API", "status": "online", "version": "2.0.0",
+            "providers": ["AnimeFLV", "JKAnime", "TioAnime", "MonosChinos"],
+            "hentaila": False}
 
 @app.get("/ping")
 def ping():
     return {"ping": "pong", "active": True}
 
+@app.get("/health")
+def health():
+    return {"success": True, "status": "ok"}
+
 @app.get("/api/latest")
 def latest_anime():
-    return scraper.get_latest_episodes()
+    try: return scraper.get_latest_episodes()
+    except Exception as exc: raise HTTPException(502, detail=str(exc))
 
 @app.get("/api/search")
-def search_anime(q: str):
-    return scraper.search_anime(q)
+def search_anime(q: str = Query(..., min_length=2), provider: str = None):
+    try: return scraper.search_anime(q, provider)
+    except Exception as exc: raise HTTPException(502, detail=str(exc))
+
+@app.get("/api/anime/info")
+@app.get("/api/info")
+def anime_info(url: str):
+    try: return scraper.get_anime_info(url)
+    except ProviderError as exc: raise HTTPException(400, detail=str(exc))
+    except Exception as exc: raise HTTPException(502, detail=str(exc))
 
 @app.get("/api/episode/encoded_id")
 def episode_sources_query(link: str):
-    return scraper.get_episode_sources(link)
+    try: return scraper.get_episode_sources(link)
+    except ProviderError as exc: raise HTTPException(400, detail=str(exc))
+    except Exception as exc: raise HTTPException(502, detail=str(exc))
 
 @app.get("/api/episode/{episode_id}")
 def episode_sources_path(episode_id: str):
-    return scraper.get_episode_sources(episode_id)
+    # Backward compatibility: old clients may pass a URL or an encoded URL.
+    from urllib.parse import unquote
+    value = unquote(episode_id)
+    try: return scraper.get_episode_sources(value)
+    except ProviderError as exc: raise HTTPException(400, detail=str(exc))
+    except Exception as exc: raise HTTPException(502, detail=str(exc))
