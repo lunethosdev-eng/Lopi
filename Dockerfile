@@ -11,15 +11,15 @@ RUN apt-get update && apt-get install -y \
     libxslt-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Instalar las librerías directamente sin depender de requirements.txt
+# Instalar las librerías con rangos de versiones compatibles para evitar bloqueos
 RUN pip install --no-cache-dir \
-    fastapi==0.110.0 \
-    uvicorn==0.28.0 \
-    cloudscraper==1.2.71 \
-    beautifulsoup4==4.12.3 \
-    requests==2.31.5 \
-    pydantic==2.6.4 \
-    gunicorn==21.2.0
+    fastapi>=0.110.0 \
+    uvicorn>=0.28.0 \
+    cloudscraper>=1.2.71 \
+    beautifulsoup4>=4.12.3 \
+    requests>=2.31.0 \
+    pydantic>=2.6.4 \
+    gunicorn>=21.2.0
 
 # Copiar todo el código fuente del servidor
 COPY . .
